@@ -39,7 +39,8 @@ jobs:
             libglx-dev \
             libglu1-mesa-dev \
             freeglut3-dev \
-            libgomp1
+            libgomp1 \
+            zip
 
       - name: Install Node.js and pnpm
         run: |
@@ -54,69 +55,59 @@ jobs:
           submodules: 'recursive'
           path: 'stable-diffusion.cpp'
 
-      - name: Cache ccache
-        uses: actions/cache@v4
-        with:
-          path: ~/.ccache
-          # Ключ учитывает архитектуру — у каждой матрицы свой кэш
-          key: ccache-cuda-${{ matrix.arch.name }}-${{ github.sha }}
-          restore-keys: |
-            ccache-cuda-${{ matrix.arch.name }}-
-
       - name: Configure and Build
-        env:
-          CCACHE_DIR: ~/.ccache
         run: |
           cd stable-diffusion.cpp
           mkdir build && cd build
           cmake .. \
             -DSD_CUDA=ON \
-            -DGGML_CCACHE=ON \
             -DCMAKE_CUDA_ARCHITECTURES="${{ matrix.arch.sm }}" \
-            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_BUILD_TYPE=Release
           cmake --build . --config Release --parallel $(nproc)
 
-      # Упаковываем в zip с именем архитектуры
+      # Явно смотрим что собралось — чтобы знать реальные пути
+      - name: List build output
+        run: |
+          echo "=== bin/ ==="
+          ls -lh stable-diffusion.cpp/build/bin/ || echo "bin/ not found"
+          echo "=== *.so ==="
+          find stable-diffusion.cpp/build/ -name "*.so" || echo "no .so files"
+
+      # Пакуем только bin/ — гарантированно существует после успешной сборки
+      # Все пути относительно GITHUB_WORKSPACE
       - name: Package artifacts
         run: |
-          mkdir -p dist
-          zip -r dist/sd-cuda-${{ matrix.arch.name }}.zip \
-            stable-diffusion.cpp/build/bin/ \
-            stable-diffusion.cpp/build/*.so \
-            2>/dev/null || true
-          ls -lh dist/
+          mkdir -p $GITHUB_WORKSPACE/dist
+          zip -r \
+            $GITHUB_WORKSPACE/dist/sd-cuda-${{ matrix.arch.name }}.zip \
+            stable-diffusion.cpp/build/bin/
+          echo "=== Packed ==="
+          ls -lh $GITHUB_WORKSPACE/dist/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: sd-cuda-${{ matrix.arch.name }}
-          path: dist/sd-cuda-${{ matrix.arch.name }}.zip
-          if-no-files-found: warn
+          path: ${{ github.workspace }}/dist/sd-cuda-${{ matrix.arch.name }}.zip
+          if-no-files-found: error  # error вместо warn — сразу видно проблему
 
-  # Отдельный job — создаёт релиз после успешной сборки всех матриц
   release:
     needs: build-cuda
     runs-on: ubuntu-latest
-    # Только при пуше в main/master, не в PR
     if: github.event_name != 'pull_request'
     permissions:
       contents: write
 
     steps:
-      # Скачиваем все артефакты из предыдущего job
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist/
-          # Скачает все артефакты в dist/<artifact-name>/file.zip
           merge-multiple: false
 
       - name: Display downloaded files
         run: find dist/ -type f -ls
 
-      # Получаем короткий SHA для имени релиза
       - name: Get short SHA
         id: sha
         run: echo "short=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
@@ -128,21 +119,20 @@ jobs:
           name: "CUDA Build ${{ steps.sha.outputs.short }}"
           body: |
             ## stable-diffusion.cpp CUDA build
-            
+
             Commit: ${{ github.sha }}
-            
+
             ### Выбери нужный архив по своей видеокарте:
-            
+
             | Файл | Архитектура | GPU |
             |------|-------------|-----|
             | `sd-cuda-turing.zip` | sm_75 | RTX 20xx, GTX 16xx |
             | `sd-cuda-ampere.zip` | sm_80, sm_86 | RTX 30xx, A100 |
             | `sd-cuda-ada.zip` | sm_89 | RTX 40xx |
             | `sd-cuda-blackwell.zip` | sm_120 | RTX 50xx |
-            
+
             > Сборка с PTX (virtual) — JIT компиляция при первом запуске.
             > Требуется драйвер с поддержкой CUDA 12.8+
-          # Рекурсивно подхватывает все zip из всех подпапок dist/
           files: dist/**/*.zip
           draft: false
           prerelease: false
