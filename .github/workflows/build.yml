@@ -5,30 +5,48 @@ on:
     branches: [ "master", "main" ]
   pull_request:
     branches: [ "master", "main" ]
-  workflow_dispatch: # Позволяет запускать сборку вручную через интерфейс GitHub
+  workflow_dispatch:
 
 jobs:
   build-cuda:
     runs-on: ubuntu-latest
-    # Используем официальный контейнер разработки NVIDIA CUDA
     container:
-      image: nvidia/cuda:12.2.2-devel-ubuntu22.04
+      image: nvidia/cuda:12.8.2-devel-ubuntu22.04
+
+    strategy:
+      matrix:
+        arch:
+          - name: "turing"
+            sm: "75-virtual"
+          - name: "ampere"
+            sm: "80-virtual;86-virtual"
+          - name: "ada"
+            sm: "89-virtual"
+          - name: "blackwell"
+            sm: "120-virtual"
 
     steps:
-      # В минимальном контейнере NVIDIA отсутствуют некоторые утилиты, установим их
       - name: Install system dependencies
         run: |
           apt-get update
-          apt-get install -y git cmake build-essential curl
+          apt-get install -y \
+            git \
+            cmake \
+            build-essential \
+            curl \
+            ccache \
+            libgl-dev \
+            libglx-dev \
+            libglu1-mesa-dev \
+            freeglut3-dev \
+            libgomp1
 
-      # Установка Node.js и pnpm (как в вашем исходном скрипте)
       - name: Install Node.js and pnpm
         run: |
           curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
           apt-get install -y nodejs
           npm install -g pnpm
 
-      # Клонирование репозитория stable-diffusion.cpp со всеми подмодулями
       - name: Clone stable-diffusion.cpp
         uses: actions/checkout@v4
         with:
@@ -36,21 +54,95 @@ jobs:
           submodules: 'recursive'
           path: 'stable-diffusion.cpp'
 
-      # Сборка проекта с флагом -DSD_CUDA=ON
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          # Ключ учитывает архитектуру — у каждой матрицы свой кэш
+          key: ccache-cuda-${{ matrix.arch.name }}-${{ github.sha }}
+          restore-keys: |
+            ccache-cuda-${{ matrix.arch.name }}-
+
       - name: Configure and Build
+        env:
+          CCACHE_DIR: ~/.ccache
         run: |
           cd stable-diffusion.cpp
           mkdir build && cd build
-          cmake .. -DSD_CUDA=ON
-          cmake --build . --config Release
-          ls -la
+          cmake .. \
+            -DSD_CUDA=ON \
+            -DGGML_CCACHE=ON \
+            -DCMAKE_CUDA_ARCHITECTURES="${{ matrix.arch.sm }}" \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build . --config Release --parallel $(nproc)
 
-      # Опционально: сохранение собранных бинарных файлов как артефактов сборки
-      - name: Upload Artifacts
+      # Упаковываем в zip с именем архитектуры
+      - name: Package artifacts
+        run: |
+          mkdir -p dist
+          zip -r dist/sd-cuda-${{ matrix.arch.name }}.zip \
+            stable-diffusion.cpp/build/bin/ \
+            stable-diffusion.cpp/build/*.so \
+            2>/dev/null || true
+          ls -lh dist/
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: stable-diffusion-cuda-binaries
-          path: |
-            stable-diffusion-cpp/build/bin/
-            stable-diffusion-cpp/build/*.bin
+          name: sd-cuda-${{ matrix.arch.name }}
+          path: dist/sd-cuda-${{ matrix.arch.name }}.zip
           if-no-files-found: warn
+
+  # Отдельный job — создаёт релиз после успешной сборки всех матриц
+  release:
+    needs: build-cuda
+    runs-on: ubuntu-latest
+    # Только при пуше в main/master, не в PR
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: write
+
+    steps:
+      # Скачиваем все артефакты из предыдущего job
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          # Скачает все артефакты в dist/<artifact-name>/file.zip
+          merge-multiple: false
+
+      - name: Display downloaded files
+        run: find dist/ -type f -ls
+
+      # Получаем короткий SHA для имени релиза
+      - name: Get short SHA
+        id: sha
+        run: echo "short=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ steps.sha.outputs.short }}
+          name: "CUDA Build ${{ steps.sha.outputs.short }}"
+          body: |
+            ## stable-diffusion.cpp CUDA build
+            
+            Commit: ${{ github.sha }}
+            
+            ### Выбери нужный архив по своей видеокарте:
+            
+            | Файл | Архитектура | GPU |
+            |------|-------------|-----|
+            | `sd-cuda-turing.zip` | sm_75 | RTX 20xx, GTX 16xx |
+            | `sd-cuda-ampere.zip` | sm_80, sm_86 | RTX 30xx, A100 |
+            | `sd-cuda-ada.zip` | sm_89 | RTX 40xx |
+            | `sd-cuda-blackwell.zip` | sm_120 | RTX 50xx |
+            
+            > Сборка с PTX (virtual) — JIT компиляция при первом запуске.
+            > Требуется драйвер с поддержкой CUDA 12.8+
+          # Рекурсивно подхватывает все zip из всех подпапок dist/
+          files: dist/**/*.zip
+          draft: false
+          prerelease: false
