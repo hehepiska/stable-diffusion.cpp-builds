@@ -35,6 +35,8 @@ jobs:
                 -DCMAKE_BUILD_TYPE=Release \
                 -DSD_BUILD_EXAMPLES=ON \
                 -DSD_BUILD_SERVER=OFF \
+                -DSD_WEBP=OFF \
+                -DSD_WEBM=OFF \
                 -DSD_CUDA=OFF \
                 -DSD_VULKAN=OFF \
                 -DSD_HIPBLAS=OFF \
@@ -42,10 +44,10 @@ jobs:
                 -DSD_BUILD_SHARED_LIBS=OFF \
                 -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++"
 
-              # Собираем только цель sd-cli
+              # Собираем только исполняемый файл sd-cli
               cmake --build build --config Release --target sd-cli -j$(nproc)
 
-              # Очищаем бинарник от отладочных символов для уменьшения размера
+              # Очищаем отладочные символы
               strip build/bin/sd-cli
             '
 
