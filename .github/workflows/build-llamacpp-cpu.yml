@@ -16,20 +16,15 @@ jobs:
         with:
           repository: leejet/stable-diffusion.cpp
           ref: master
-          submodules: recursive   # обязательно для подтягивания ggml
+          submodules: recursive
 
-      - name: Build sd-cli in Ubuntu 20.04 container (glibc 2.31)
+      - name: Build sd-cli in manylinux container (glibc 2.28 -> supports Ubuntu 20.04+)
         run: |
           docker run --rm \
             -v "${{ github.workspace }}:/workspace" \
             -w /workspace \
-            ubuntu:20.04 bash -c '
+            quay.io/pypa/manylinux_2_28_x86_64 bash -c '
               set -ex
-              apt-get update
-              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-                build-essential \
-                cmake \
-                ca-certificates
 
               cmake -B build \
                 -DCMAKE_BUILD_TYPE=Release \
@@ -44,21 +39,21 @@ jobs:
                 -DSD_BUILD_SHARED_LIBS=OFF \
                 -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++"
 
-              # Собираем только исполняемый файл sd-cli
+              # Компиляция строго sd-cli
               cmake --build build --config Release --target sd-cli -j$(nproc)
 
-              # Очищаем отладочные символы
+              # Очищаем отладочные символы и выставляем права на файл
               strip build/bin/sd-cli
+              chmod 755 build/bin/sd-cli
             '
 
       - name: Smoke test
         run: |
-          # Проверяем запуск прямо на хосте (обратная совместимость glibc)
+          # Проверяем запуск бинарника
           ./build/bin/sd-cli --help
 
       - name: Package
         run: |
-          # Упаковываем строго один бинарник
           tar -czvf sd-cli-linux-x86_64-cpu.tar.gz -C build/bin sd-cli
 
       - name: Upload artifact (safety net)
