@@ -1,67 +1,73 @@
-name: build-llamacpp-custom
+name: build-sdcpp-cpu-custom
 on:
   schedule:
     - cron: '0 4,16 * * *'   # дважды в сутки
   workflow_dispatch: {}
+
 permissions:
   contents: write
+
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
-          repository: ggml-org/llama.cpp
+          repository: leejet/stable-diffusion.cpp
           ref: master
+          submodules: recursive   # обязательно для подтягивания ggml
 
-      - name: Install CUDA Toolkit
-        uses: Jimver/cuda-toolkit@v0.2.36
-        with:
-          cuda: '13.2.0'
-          method: network
+      - name: Build sd-cli in Ubuntu 20.04 container (glibc 2.31)
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace \
+            ubuntu:20.04 bash -c '
+              set -ex
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                build-essential \
+                cmake \
+                ca-certificates
 
-      - name: Install Vulkan SDK
-        uses: jakoch/install-vulkan-sdk-action@v1
-        with:
-          install_runtime: true
-          cache: true
+              cmake -B build \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DSD_BUILD_EXAMPLES=ON \
+                -DSD_BUILD_SERVER=OFF \
+                -DSD_CUDA=OFF \
+                -DSD_VULKAN=OFF \
+                -DSD_HIPBLAS=OFF \
+                -DSD_METAL=OFF \
+                -DSD_BUILD_SHARED_LIBS=OFF \
+                -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++"
 
-      - name: Setup MSVC environment
-        uses: ilammy/msvc-dev-cmd@v1
+              # Собираем только цель sd-cli
+              cmake --build build --config Release --target sd-cli -j$(nproc)
 
-      - name: Setup ccache
-        uses: hendrikmuhs/ccache-action@v1.2
-        with:
-          key: ${{ runner.os }}-cuda13-vulkan
+              # Очищаем бинарник от отладочных символов для уменьшения размера
+              strip build/bin/sd-cli
+            '
 
-      - name: Configure
-        run: >
-          cmake -B build -G "Ninja Multi-Config"
-          -DGGML_CUDA=ON -DGGML_VULKAN=ON
-          -DCMAKE_CUDA_ARCHITECTURES=120
-          -DGGML_CUDA_MXFP4=OFF
-          -DGGML_BACKEND_DL=ON
-          -DGGML_NATIVE=OFF
-          -DGGML_CPU_ALL_VARIANTS=ON
-          -DBUILD_SHARED_LIBS=ON
-
-      - name: Build
-        run: cmake --build build --config Release -j
-        
       - name: Smoke test
-        run: .\build\bin\Release\llama-cli.exe --version
+        run: |
+          # Проверяем запуск прямо на хосте (обратная совместимость glibc)
+          ./build/bin/sd-cli --help
 
       - name: Package
-        run: Compress-Archive -Path build\bin\Release\* -DestinationPath llamacpp-cuda13-vulkan-cpu.zip
+        run: |
+          # Упаковываем строго один бинарник
+          tar -czvf sd-cli-linux-x86_64-cpu.tar.gz -C build/bin sd-cli
 
       - name: Upload artifact (safety net)
         uses: actions/upload-artifact@v4
         with:
-          name: llamacpp-cuda13-vulkan-cpu
-          path: llamacpp-cuda13-vulkan-cpu.zip
+          name: sd-cli-linux-x86_64-cpu
+          path: sd-cli-linux-x86_64-cpu.tar.gz
           retention-days: 3
 
-      - uses: softprops/action-gh-release@v2
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
         with:
-          tag_name: nightly-${{ github.run_number }}
-          files: llamacpp-cuda13-vulkan-cpu.zipv
+          tag_name: nightly-sd-${{ github.run_number }}
+          files: sd-cli-linux-x86_64-cpu.tar.gz
