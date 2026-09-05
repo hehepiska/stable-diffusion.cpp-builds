@@ -1,0 +1,67 @@
+name: build-llamacpp-custom
+on:
+  schedule:
+    - cron: '0 4,16 * * *'   # дважды в сутки
+  workflow_dispatch: {}
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: ggml-org/llama.cpp
+          ref: master
+
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: '13.2.0'
+          method: network
+
+      - name: Install Vulkan SDK
+        uses: jakoch/install-vulkan-sdk-action@v1
+        with:
+          install_runtime: true
+          cache: true
+
+      - name: Setup MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ runner.os }}-cuda13-vulkan
+
+      - name: Configure
+        run: >
+          cmake -B build -G "Ninja Multi-Config"
+          -DGGML_CUDA=ON -DGGML_VULKAN=ON
+          -DCMAKE_CUDA_ARCHITECTURES=120
+          -DGGML_CUDA_MXFP4=OFF
+          -DGGML_BACKEND_DL=ON
+          -DGGML_NATIVE=OFF
+          -DGGML_CPU_ALL_VARIANTS=ON
+          -DBUILD_SHARED_LIBS=ON
+
+      - name: Build
+        run: cmake --build build --config Release -j
+        
+      - name: Smoke test
+        run: .\build\bin\Release\llama-cli.exe --version
+
+      - name: Package
+        run: Compress-Archive -Path build\bin\Release\* -DestinationPath llamacpp-cuda13-vulkan-cpu.zip
+
+      - name: Upload artifact (safety net)
+        uses: actions/upload-artifact@v4
+        with:
+          name: llamacpp-cuda13-vulkan-cpu
+          path: llamacpp-cuda13-vulkan-cpu.zip
+          retention-days: 3
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly-${{ github.run_number }}
+          files: llamacpp-cuda13-vulkan-cpu.zipv
